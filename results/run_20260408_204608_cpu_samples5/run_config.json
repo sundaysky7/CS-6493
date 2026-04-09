@@ -1,0 +1,19 @@
+{
+  "force_cpu": true,
+  "max_samples_per_dataset": 5,
+  "models": [
+    "Qwen/Qwen2.5-Math-1.5B-Instruct",
+    "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+  ],
+  "prompt_methods": [
+    "standard",
+    "cot",
+    "self_refine",
+    "least_to_most"
+  ],
+  "datasets": [
+    "gsm8k",
+    "math500",
+    "aime2024"
+  ]
+}

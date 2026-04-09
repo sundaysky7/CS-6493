@@ -1,0 +1,42 @@
+[
+  {
+    "question": "Find the remainder when 2^2024 is divided by 7.",
+    "answer": "2"
+  },
+  {
+    "question": "How many integers from 1 through 1000 are divisible by 6 but not by 9?",
+    "answer": "111"
+  },
+  {
+    "question": "A quadratic polynomial f(x) has roots 3 and 7 and leading coefficient 1. Find f(5).",
+    "answer": "-4"
+  },
+  {
+    "question": "A fair six-sided die is rolled twice. What is the probability the sum is 9?",
+    "answer": "2/18"
+  },
+  {
+    "question": "The arithmetic mean of five numbers is 18. Four of the numbers are 10, 12, 20, and 28. Find the fifth number.",
+    "answer": "20"
+  },
+  {
+    "question": "Solve for x: 3x + 5 = 2x + 17.",
+    "answer": "12"
+  },
+  {
+    "question": "What is the area of a triangle with base 14 and height 9?",
+    "answer": "63"
+  },
+  {
+    "question": "If \\(a+b=11\\) and \\(ab=24\\), find \\(a^2+b^2\\).",
+    "answer": "73"
+  },
+  {
+    "question": "Evaluate \\(\\sum_{k=1}^{10} k\\).",
+    "answer": "55"
+  },
+  {
+    "question": "A sequence starts 2, 5, 8, 11, ... What is the 20th term?",
+    "answer": "59"
+  }
+]
