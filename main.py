@@ -123,10 +123,14 @@ def _write_or_validate_run_config(
         keys_to_validate = [
             "force_cpu",
             "max_samples_per_dataset",
+            "enable_4bit",
             "models",
             "prompt_methods",
             "datasets",
         ]
+
+        if "enable_4bit" not in existing_config:
+            existing_config["enable_4bit"] = not bool(existing_config.get("disable_4bit", False))
         normalized_existing = {key: existing_config.get(key) for key in keys_to_validate}
         normalized_current = {key: run_metadata.get(key) for key in keys_to_validate}
 
@@ -175,6 +179,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Resume from an existing run directory instead of creating a new one.",
     )
+    parser.add_argument(
+        "--enable-4bit",
+        action="store_true",
+        help="Enable optional 4-bit quantized loading on GPU; default uses standard CUDA/CPU loading.",
+    )
     return parser
 
 
@@ -200,10 +209,11 @@ def main() -> None:
     )
 
     logging.info(
-        "Runtime options | force_cpu=%s | max_samples_per_dataset=%s | resume_run_dir=%s",
+        "Runtime options | force_cpu=%s | max_samples_per_dataset=%s | resume_run_dir=%s | enable_4bit=%s",
         args.force_cpu,
         args.max_samples_per_dataset,
         args.resume_run_dir,
+        args.enable_4bit,
     )
 
     run_dir, is_resumed_run = _resolve_run_output_dir(
@@ -219,6 +229,7 @@ def main() -> None:
     run_metadata = {
         "force_cpu": args.force_cpu,
         "max_samples_per_dataset": args.max_samples_per_dataset,
+        "enable_4bit": args.enable_4bit,
         "models": MODEL_NAMES,
         "prompt_methods": PROMPT_METHODS,
         "datasets": DATASETS,
@@ -272,6 +283,7 @@ def main() -> None:
         output_path=raw_results_path,
         max_samples_per_dataset=args.max_samples_per_dataset,
         force_cpu=args.force_cpu,
+        enable_4bit=args.enable_4bit,
         resume=is_resumed_run,
     )
 

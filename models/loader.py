@@ -1,14 +1,16 @@
 """模型加载与生成模块 / Model loading and generation helpers.
 
 中文（版本1）：
-    负责优先按课程要求加载 4bit 量化模型；当 CUDA 不可用或显式要求 CPU 时，
-    自动回退为普通精度 CPU 加载，并提供固定随机种子的文本生成接口。
+    默认优先使用标准 CUDA 加载模型；仅在显式请求 4bit 量化时，才尝试使用
+    bitsandbytes 的 4bit 路径。若 CUDA 不可用或显式要求 CPU，则回退为
+    CPU 加载，并提供固定随机种子的文本生成接口。
     同时兼容历史模型别名，避免旧配置中的模型名失效。
 
 English (Version 2):
-    Prefer assignment-required 4-bit quantized loading on CUDA-capable systems.
-    When CUDA is unavailable or CPU execution is explicitly requested, fall back
-    to standard CPU loading while preserving deterministic generation helpers.
+    Prefer standard CUDA model loading by default. Only attempt the
+    bitsandbytes-based 4-bit path when 4-bit quantization is explicitly
+    requested. If CUDA is unavailable or CPU execution is explicitly requested,
+    fall back to CPU loading while preserving deterministic generation helpers.
     Also supports legacy model aliases so older run configurations remain usable.
 """
 
@@ -27,6 +29,53 @@ LOGGER = logging.getLogger(__name__)
 MODEL_ALIASES = {
     "deepseek-ai/DeepSeek-R1-Qwen-1.5B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
 }
+
+
+def _log_runtime_placement(
+    model: AutoModelForCausalLM,
+    load_mode: str,
+    resolved_model_name: str,
+) -> None:
+    """
+    中文（版本1）：
+        在模型加载完成后记录实际运行设备、dtype 与加载模式，便于确认是否真正走到
+        CUDA / 4bit / CPU 路径。
+
+    English (Version 2):
+        Log the actual runtime device, dtype, and load mode after model loading
+        so it is easy to confirm whether CUDA / 4-bit / CPU was actually used.
+    """
+    try:
+        param = next(model.parameters())
+        device = str(param.device)
+        dtype = str(param.dtype)
+    except StopIteration:
+        device = "unknown"
+        dtype = "unknown"
+
+    if device.startswith("cuda") and torch.cuda.is_available():
+        try:
+            device_index = param.device.index if param.device.index is not None else torch.cuda.current_device()
+            gpu_name = torch.cuda.get_device_name(device_index)
+            LOGGER.info(
+                "Model runtime placement | model=%s | mode=%s | device=%s | dtype=%s | gpu=%s",
+                resolved_model_name,
+                load_mode,
+                device,
+                dtype,
+                gpu_name,
+            )
+            return
+        except Exception:  # noqa: BLE001
+            pass
+
+    LOGGER.info(
+        "Model runtime placement | model=%s | mode=%s | device=%s | dtype=%s",
+        resolved_model_name,
+        load_mode,
+        device,
+        dtype,
+    )
 
 
 def _set_seed(seed: int) -> None:
@@ -55,27 +104,39 @@ def _resolve_model_name(model_name: str) -> str:
 def load_quantized_model(
     model_name: str,
     force_cpu: bool = False,
+    enable_4bit: bool = False,
 ) -> tuple[AutoModelForCausalLM, AutoTokenizer]:
     """
     中文（版本1）：
-        优先使用 bitsandbytes 配置加载 4bit NF4 量化模型，并使用 bfloat16 计算。
+        默认优先使用标准 CUDA 加载模型。
+        仅当 enable_4bit=True 时，才尝试使用 bitsandbytes 配置加载 4bit NF4
+        量化模型，并使用 bfloat16 / float16 计算。
         若 CUDA 不可用或 force_cpu=True，则自动回退到 CPU 普通加载。
         当 tokenizer 缺少 pad_token 时，按要求回退到 eos_token。
 
     English (Version 2):
-        Prefer loading a model/tokenizer pair with 4-bit NF4 quantization and
-        bfloat16 compute on CUDA. If CUDA is unavailable or force_cpu=True,
-        automatically fall back to standard CPU loading. If no pad token is
-        defined, fallback to EOS token.
+        Prefer standard CUDA loading by default.
+        Only when enable_4bit=True, attempt loading with 4-bit NF4 quantization
+        via bitsandbytes and bfloat16 / float16 compute. If CUDA is unavailable
+        or force_cpu=True, automatically fall back to standard CPU loading.
+        If no pad token is defined, fallback to EOS token.
 
     :param model_name: Hugging Face 模型名称 / HF model id.
     :param force_cpu: 是否强制使用 CPU / whether to force CPU execution.
+    :param enable_4bit: 是否启用 4bit 量化 / whether to enable 4-bit quantization.
     :return: (model, tokenizer) 元组 / tuple.
     """
     resolved_model_name = _resolve_model_name(model_name)
     use_cpu = force_cpu or not torch.cuda.is_available()
+    cuda_dtype = (
+        torch.bfloat16
+        if torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+        else torch.float16
+    )
 
     tokenizer = AutoTokenizer.from_pretrained(resolved_model_name, trust_remote_code=True)
+
+    load_mode = "cpu"
 
     if use_cpu:
         LOGGER.info("Loading model on CPU without 4-bit quantization: %s", resolved_model_name)
@@ -85,30 +146,56 @@ def load_quantized_model(
             trust_remote_code=True,
         )
         model = model.to("cpu")
+        load_mode = "cpu"
     else:
         try:
-            if not is_bitsandbytes_available():
-                raise RuntimeError("bitsandbytes is not available in the current environment.")
+            if enable_4bit:
+                try:
+                    if not is_bitsandbytes_available():
+                        raise RuntimeError("bitsandbytes is not available in the current environment.")
 
-            LOGGER.info("Loading model on CUDA with 4-bit quantization: %s", resolved_model_name)
-            bnb_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.bfloat16,
-                bnb_4bit_use_double_quant=True,
-            )
-            model = AutoModelForCausalLM.from_pretrained(
-                resolved_model_name,
-                quantization_config=bnb_config,
-                device_map="auto",
-                torch_dtype=torch.bfloat16,
-                trust_remote_code=True,
-            )
-        except Exception as exc:  # noqa: BLE001
+                    LOGGER.info("Loading model on CUDA with 4-bit quantization: %s", resolved_model_name)
+                    bnb_config = BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_quant_type="nf4",
+                        bnb_4bit_compute_dtype=cuda_dtype,
+                        bnb_4bit_use_double_quant=True,
+                    )
+                    model = AutoModelForCausalLM.from_pretrained(
+                        resolved_model_name,
+                        quantization_config=bnb_config,
+                        device_map="auto",
+                        torch_dtype=cuda_dtype,
+                        trust_remote_code=True,
+                    )
+                    load_mode = "cuda_4bit"
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.warning(
+                        "Quantized CUDA loading failed for %s; falling back to standard CUDA loading. Reason: %s",
+                        resolved_model_name,
+                        exc,
+                    )
+                    model = AutoModelForCausalLM.from_pretrained(
+                        resolved_model_name,
+                        torch_dtype=cuda_dtype,
+                        trust_remote_code=True,
+                    )
+                    model = model.to("cuda")
+                    load_mode = "cuda_standard"
+            else:
+                LOGGER.info("Loading model on standard CUDA without 4-bit quantization: %s", resolved_model_name)
+                model = AutoModelForCausalLM.from_pretrained(
+                    resolved_model_name,
+                    torch_dtype=cuda_dtype,
+                    trust_remote_code=True,
+                )
+                model = model.to("cuda")
+                load_mode = "cuda_standard"
+        except Exception as cuda_exc:  # noqa: BLE001
             LOGGER.warning(
-                "Quantized CUDA loading failed for %s; falling back to CPU. Reason: %s",
+                "CUDA loading failed for %s; falling back to CPU. Reason: %s",
                 resolved_model_name,
-                exc,
+                cuda_exc,
             )
             model = AutoModelForCausalLM.from_pretrained(
                 resolved_model_name,
@@ -116,11 +203,13 @@ def load_quantized_model(
                 trust_remote_code=True,
             )
             model = model.to("cpu")
+            load_mode = "cpu"
 
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     model.eval()
+    _log_runtime_placement(model, load_mode=load_mode, resolved_model_name=resolved_model_name)
     return model, tokenizer
 
 

@@ -91,6 +91,7 @@ def run_full_experiment(
     output_path: str = "results/raw_results.csv",
     max_samples_per_dataset: int | None = None,
     force_cpu: bool = False,
+    enable_4bit: bool = False,
     resume: bool = False,
 ) -> None:
     """
@@ -114,6 +115,10 @@ def run_full_experiment(
         每个数据集最多使用多少条样本；None 表示使用全部样本
         / maximum number of samples per dataset; None means use all samples.
     :param force_cpu: 是否强制使用 CPU 加载模型 / whether to force CPU loading.
+    :param enable_4bit:
+        是否启用 4bit 量化；若为 False，则优先使用标准 CUDA/CPU 路径
+        / whether to enable 4-bit quantization; if False, prefer the standard
+        CUDA/CPU loading path.
     :param resume: 是否启用断点续跑 / whether to resume from existing raw results.
     CSV fields:
         model, dataset, method, question, true_answer, model_response, response_length
@@ -133,8 +138,17 @@ def run_full_experiment(
     skipped_count = 0
 
     for model_name in models:
-        LOGGER.info("Loading model: %s | force_cpu=%s", model_name, force_cpu)
-        model, tokenizer = load_quantized_model(model_name, force_cpu=force_cpu)
+        LOGGER.info(
+            "Loading model: %s | force_cpu=%s | enable_4bit=%s",
+            model_name,
+            force_cpu,
+            enable_4bit,
+        )
+        model, tokenizer = load_quantized_model(
+            model_name,
+            force_cpu=force_cpu,
+            enable_4bit=enable_4bit,
+        )
 
         for dataset_name in datasets:
             data = load_processed_dataset(dataset_name)
