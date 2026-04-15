@@ -135,6 +135,8 @@ def load_quantized_model(
     )
 
     tokenizer = AutoTokenizer.from_pretrained(resolved_model_name, trust_remote_code=True)
+    # Decoder-only models should use left padding for correct batched generation.
+    tokenizer.padding_side = "left"
 
     load_mode = "cpu"
 
@@ -256,3 +258,45 @@ def generate_model_response(
 
     generated_ids = output_ids[0][inputs["input_ids"].shape[1] :]
     return tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+
+
+def generate_model_responses_batch(
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    prompts: list[str],
+    max_new_tokens: int = 512,
+    temperature: float = 0.1,
+) -> list[str]:
+    """
+    中文（版本1）：
+        对一组 prompt 执行批量文本生成，返回与输入 prompts 对齐的新增生成文本列表。
+        该接口用于提升吞吐，尽量减少逐样本调用 generate 带来的开销。
+
+    English (Version 2):
+        Run batched generation for a list of prompts and return newly generated
+        texts aligned with the input order. This helper improves throughput by
+        reducing per-sample generate overhead.
+    """
+    if not prompts:
+        return []
+
+    device = next(model.parameters()).device
+    inputs = tokenizer(prompts, return_tensors="pt", padding=True)
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    input_lengths = inputs["attention_mask"].sum(dim=1)
+
+    with torch.no_grad():
+        output_ids = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            do_sample=temperature > 0,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+        )
+
+    responses: list[str] = []
+    for idx in range(output_ids.shape[0]):
+        generated_ids = output_ids[idx][int(input_lengths[idx].item()) :]
+        responses.append(tokenizer.decode(generated_ids, skip_special_tokens=True).strip())
+    return responses

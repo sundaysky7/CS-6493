@@ -1,9 +1,23 @@
+# --- 核心深度学习框架 (必须优先确保 CUDA 版本) ---
+# 注意：在 Windows 上建议通过以下命令手动安装以确保 CUDA 12.8 匹配：
+# pip install torch>=2.3.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 torch>=2.3.1
+accelerate>=0.30.1
+
+# --- Hugging Face & 模型加载 ---
 transformers>=4.41.2
 datasets>=2.19.1
+# Windows 下使用 bitsandbytes 的特殊修复版，支持 4-bit/8-bit 量化
+bitsandbytes-windows>=0.4
+
+# --- 数据处理与分析 ---
 pandas>=2.2.0
 numpy>=1.26.0
+
+# --- 可视化 ---
 matplotlib>=3.8.0
 seaborn>=0.13.0
-bitsandbytes>=0.43.1; platform_system != "Windows"
-accelerate>=0.30.1
+
+# --- 辅助工具 ---
+scipy
+huggingface_hub

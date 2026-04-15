@@ -19,7 +19,11 @@ import pandas as pd
 from pandas.errors import EmptyDataError
 
 from data.preprocess import load_processed_dataset
-from models.loader import generate_model_response, load_quantized_model
+from models.loader import (
+    generate_model_response,
+    generate_model_responses_batch,
+    load_quantized_model,
+)
 from prompts.templates import generate_prompt
 
 LOGGER = logging.getLogger(__name__)
@@ -66,7 +70,7 @@ def _load_completed_row_keys(output_path: str) -> set[tuple[str, str, str, str, 
     return completed_keys
 
 
-def _append_result_row(output_path: str, row: dict[str, object]) -> None:
+def _append_result_rows(output_path: str, rows: list[dict[str, object]]) -> None:
     """
     中文（版本1）：
         将单条实验结果增量追加到 CSV。
@@ -79,9 +83,65 @@ def _append_result_row(output_path: str, row: dict[str, object]) -> None:
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    row_df = pd.DataFrame([row])
+    if not rows:
+        return
+
+    row_df = pd.DataFrame(rows)
     write_header = not target.exists()
     row_df.to_csv(target, mode="a", header=write_header, index=False)
+
+
+def _batched(items: list[dict[str, str]], batch_size: int) -> list[list[dict[str, str]]]:
+    """按固定 batch size 切分样本列表 / Split samples by fixed batch size."""
+    return [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
+
+
+def _is_cuda_oom_error(exc: Exception) -> bool:
+    """判断是否为 CUDA OOM 异常 / Detect CUDA OOM errors."""
+    text = str(exc).lower()
+    return "out of memory" in text or "cuda error: out of memory" in text
+
+
+def _generate_with_oom_fallback(
+    model,
+    tokenizer,
+    prompts: list[str],
+    max_new_tokens: int,
+    temperature: float,
+) -> list[str]:
+    """
+    批量生成并在 OOM 时自动二分降级，避免一次大批次直接失败。
+    """
+    if not prompts:
+        return []
+
+    try:
+        return generate_model_responses_batch(
+            model=model,
+            tokenizer=tokenizer,
+            prompts=prompts,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if not _is_cuda_oom_error(exc) or len(prompts) == 1:
+            raise
+        split = max(1, len(prompts) // 2)
+        left = _generate_with_oom_fallback(
+            model=model,
+            tokenizer=tokenizer,
+            prompts=prompts[:split],
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+        )
+        right = _generate_with_oom_fallback(
+            model=model,
+            tokenizer=tokenizer,
+            prompts=prompts[split:],
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+        )
+        return left + right
 
 
 def run_full_experiment(
@@ -93,6 +153,9 @@ def run_full_experiment(
     force_cpu: bool = False,
     enable_4bit: bool = False,
     resume: bool = False,
+    batch_size: int = 16,
+    flush_every: int = 100,
+    max_new_tokens: int = 512,
 ) -> None:
     """
     中文（版本1）：
@@ -120,6 +183,9 @@ def run_full_experiment(
         / whether to enable 4-bit quantization; if False, prefer the standard
         CUDA/CPU loading path.
     :param resume: 是否启用断点续跑 / whether to resume from existing raw results.
+    :param batch_size: 批量推理大小 / generation batch size.
+    :param flush_every: 增量写盘阈值 / flush threshold for buffered rows.
+    :param max_new_tokens: 每次生成最大新 token 数 / max new tokens per generation.
     CSV fields:
         model, dataset, method, question, true_answer, model_response, response_length
     """
@@ -136,6 +202,7 @@ def run_full_experiment(
 
     row_count = 0
     skipped_count = 0
+    row_buffer: list[dict[str, object]] = []
 
     for model_name in models:
         LOGGER.info(
@@ -155,14 +222,16 @@ def run_full_experiment(
             if max_samples_per_dataset is not None:
                 data = data[:max_samples_per_dataset]
             LOGGER.info(
-                "Running %s on %s (%d samples)",
+                "Running %s on %s (%d samples) | batch_size=%d",
                 model_name,
                 dataset_name,
                 len(data),
+                batch_size,
             )
 
             for method in prompt_methods:
                 LOGGER.info("Method: %s", method)
+                pending_samples: list[dict[str, str]] = []
                 for idx, sample in enumerate(data):
                     question = sample["question"]
                     true_answer = sample["answer"]
@@ -185,55 +254,137 @@ def run_full_experiment(
                         )
                         continue
 
+                    pending_samples.append(
+                        {
+                            "question": str(question),
+                            "true_answer": str(true_answer),
+                            "sample_idx": str(idx),
+                        }
+                    )
+
+                for sample_batch in _batched(pending_samples, batch_size):
+                    questions = [item["question"] for item in sample_batch]
+                    answers = [item["true_answer"] for item in sample_batch]
+                    indices = [int(item["sample_idx"]) for item in sample_batch]
+
                     try:
                         if method == "self_refine":
-                            stage1_prompt = generate_prompt(question, "self_refine_stage1")
-                            preliminary = generate_model_response(
+                            stage1_prompts = [
+                                generate_prompt(question_text, "self_refine_stage1")
+                                for question_text in questions
+                            ]
+                            preliminaries = _generate_with_oom_fallback(
                                 model=model,
                                 tokenizer=tokenizer,
-                                prompt=stage1_prompt,
+                                prompts=stage1_prompts,
+                                max_new_tokens=max_new_tokens,
+                                temperature=0.1,
                             )
-                            stage2_prompt = generate_prompt(
-                                question,
-                                f"self_refine_stage2::{preliminary}",
-                            )
-                            response = generate_model_response(
+                            stage2_prompts = [
+                                generate_prompt(
+                                    question_text,
+                                    f"self_refine_stage2::{preliminary}",
+                                )
+                                for question_text, preliminary in zip(questions, preliminaries)
+                            ]
+                            responses = _generate_with_oom_fallback(
                                 model=model,
                                 tokenizer=tokenizer,
-                                prompt=stage2_prompt,
+                                prompts=stage2_prompts,
+                                max_new_tokens=max_new_tokens,
+                                temperature=0.1,
                             )
                         else:
-                            prompt = generate_prompt(question, method)
-                            response = generate_model_response(
+                            prompts = [generate_prompt(question_text, method) for question_text in questions]
+                            responses = _generate_with_oom_fallback(
                                 model=model,
                                 tokenizer=tokenizer,
-                                prompt=prompt,
+                                prompts=prompts,
+                                max_new_tokens=max_new_tokens,
+                                temperature=0.1,
                             )
                     except Exception as exc:  # noqa: BLE001
-                        # [CN] 异常样本跳过并记录，保障批量实验鲁棒性。
-                        # [EN] Skip and log failed samples to preserve long-run robustness.
+                        # [CN] 批次失败时降级为逐样本，避免整批丢失。
+                        # [EN] Fall back to per-sample generation when batch fails.
                         LOGGER.exception(
-                            "Failed on model=%s dataset=%s method=%s sample_idx=%d: %s",
+                            "Batch failed on model=%s dataset=%s method=%s (batch_size=%d): %s",
                             model_name,
                             dataset_name,
                             method,
-                            idx,
+                            len(sample_batch),
                             exc,
                         )
-                        continue
+                        responses = []
+                        for question_text in questions:
+                            try:
+                                if method == "self_refine":
+                                    stage1_prompt = generate_prompt(question_text, "self_refine_stage1")
+                                    preliminary = generate_model_response(
+                                        model=model,
+                                        tokenizer=tokenizer,
+                                        prompt=stage1_prompt,
+                                        max_new_tokens=max_new_tokens,
+                                    )
+                                    stage2_prompt = generate_prompt(
+                                        question_text,
+                                        f"self_refine_stage2::{preliminary}",
+                                    )
+                                    response_text = generate_model_response(
+                                        model=model,
+                                        tokenizer=tokenizer,
+                                        prompt=stage2_prompt,
+                                        max_new_tokens=max_new_tokens,
+                                    )
+                                else:
+                                    prompt = generate_prompt(question_text, method)
+                                    response_text = generate_model_response(
+                                        model=model,
+                                        tokenizer=tokenizer,
+                                        prompt=prompt,
+                                        max_new_tokens=max_new_tokens,
+                                    )
+                            except Exception as sample_exc:  # noqa: BLE001
+                                LOGGER.exception(
+                                    "Failed on model=%s dataset=%s method=%s sample_idx=%d: %s",
+                                    model_name,
+                                    dataset_name,
+                                    method,
+                                    indices[len(responses)],
+                                    sample_exc,
+                                )
+                                response_text = ""
+                            responses.append(response_text)
 
-                    row = {
-                        "model": model_name,
-                        "dataset": dataset_name,
-                        "method": method,
-                        "question": question,
-                        "true_answer": true_answer,
-                        "model_response": response,
-                        "response_length": _word_count(response),
-                    }
-                    _append_result_row(output_path, row)
-                    completed_keys.add(row_key)
-                    row_count += 1
+                    for idx, question, true_answer, response in zip(indices, questions, answers, responses):
+                        if response == "":
+                            continue
+                        row = {
+                            "model": model_name,
+                            "dataset": dataset_name,
+                            "method": method,
+                            "question": question,
+                            "true_answer": true_answer,
+                            "model_response": response,
+                            "response_length": _word_count(response),
+                        }
+                        row_buffer.append(row)
+                        row_key = (
+                            model_name,
+                            dataset_name,
+                            method,
+                            str(question),
+                            str(true_answer),
+                        )
+                        completed_keys.add(row_key)
+                        row_count += 1
+
+                        if len(row_buffer) >= flush_every:
+                            _append_result_rows(output_path, row_buffer)
+                            row_buffer.clear()
+
+    if row_buffer:
+        _append_result_rows(output_path, row_buffer)
+        row_buffer.clear()
 
     LOGGER.info(
         "Saved raw results incrementally to %s | newly_saved=%d | skipped_completed=%d",

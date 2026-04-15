@@ -124,6 +124,9 @@ def _write_or_validate_run_config(
             "force_cpu",
             "max_samples_per_dataset",
             "enable_4bit",
+            "batch_size",
+            "flush_every",
+            "max_new_tokens",
             "models",
             "prompt_methods",
             "datasets",
@@ -184,6 +187,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable optional 4-bit quantized loading on GPU; default uses standard CUDA/CPU loading.",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=16,
+        help="Generation batch size for throughput optimization.",
+    )
+    parser.add_argument(
+        "--flush-every",
+        type=int,
+        default=100,
+        help="Flush buffered raw result rows to CSV every N samples.",
+    )
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=512,
+        help="Maximum new tokens per generation call.",
+    )
     return parser
 
 
@@ -202,6 +223,12 @@ def main() -> None:
 
     if args.max_samples_per_dataset is not None and args.max_samples_per_dataset <= 0:
         raise ValueError("--max-samples-per-dataset must be a positive integer.")
+    if args.batch_size <= 0:
+        raise ValueError("--batch-size must be a positive integer.")
+    if args.flush_every <= 0:
+        raise ValueError("--flush-every must be a positive integer.")
+    if args.max_new_tokens <= 0:
+        raise ValueError("--max-new-tokens must be a positive integer.")
 
     logging.basicConfig(
         level=logging.INFO,
@@ -209,11 +236,15 @@ def main() -> None:
     )
 
     logging.info(
-        "Runtime options | force_cpu=%s | max_samples_per_dataset=%s | resume_run_dir=%s | enable_4bit=%s",
+        "Runtime options | force_cpu=%s | max_samples_per_dataset=%s | resume_run_dir=%s | "
+        "enable_4bit=%s | batch_size=%s | flush_every=%s | max_new_tokens=%s",
         args.force_cpu,
         args.max_samples_per_dataset,
         args.resume_run_dir,
         args.enable_4bit,
+        args.batch_size,
+        args.flush_every,
+        args.max_new_tokens,
     )
 
     run_dir, is_resumed_run = _resolve_run_output_dir(
@@ -230,6 +261,9 @@ def main() -> None:
         "force_cpu": args.force_cpu,
         "max_samples_per_dataset": args.max_samples_per_dataset,
         "enable_4bit": args.enable_4bit,
+        "batch_size": args.batch_size,
+        "flush_every": args.flush_every,
+        "max_new_tokens": args.max_new_tokens,
         "models": MODEL_NAMES,
         "prompt_methods": PROMPT_METHODS,
         "datasets": DATASETS,
@@ -285,6 +319,9 @@ def main() -> None:
         force_cpu=args.force_cpu,
         enable_4bit=args.enable_4bit,
         resume=is_resumed_run,
+        batch_size=args.batch_size,
+        flush_every=args.flush_every,
+        max_new_tokens=args.max_new_tokens,
     )
 
     # [CN] 3) 指标统计：计算准确率与平均响应长度

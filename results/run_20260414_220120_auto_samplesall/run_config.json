@@ -1,0 +1,23 @@
+{
+  "force_cpu": false,
+  "max_samples_per_dataset": null,
+  "enable_4bit": false,
+  "batch_size": 24,
+  "flush_every": 200,
+  "max_new_tokens": 512,
+  "models": [
+    "Qwen/Qwen2.5-Math-1.5B-Instruct",
+    "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+  ],
+  "prompt_methods": [
+    "standard",
+    "cot",
+    "self_refine",
+    "least_to_most"
+  ],
+  "datasets": [
+    "gsm8k",
+    "math500",
+    "aime2024"
+  ]
+}
